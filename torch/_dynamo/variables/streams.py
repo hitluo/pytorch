@@ -358,7 +358,7 @@ class StreamContextVariable(FxTracebackAnnotateVariable):
         return super().exit(tx, *args)
 
     def python_type(self) -> type:
-        return torch.cuda.StreamContext
+        return type(self.stream.value)
 
     def supports_graph_breaks(self) -> bool:
         return True
@@ -400,7 +400,7 @@ class StreamVariable(StreamContextVariable):
         super().__init__(None, **kwargs)
 
     def python_type(self) -> type:
-        return self._cpython_type
+        return type(self.value)
 
     def _stream_device_handle_get(
         self: "StreamVariable", tx: "InstructionTranslatorBase"
@@ -637,8 +637,39 @@ _stream_fn_to_variable_cls: dict[object, type[StreamVariable]] = {
     torch.xpu.current_stream: XpuStreamVariable,
 }
 
+_privateuse1_stream_cls_loaded = False
+
+
+def _init_privateuse1_stream_variable() -> None:
+    """Discover StreamVariable subclass from PrivateUse1 backend module.
+
+    Mirrors the pattern used by Inductor for DeviceOpOverrides (A2) and
+    AOTI Runner (A3) dynamic loading via _get_custom_mod_func.
+    """
+    global _privateuse1_stream_cls_loaded
+    if _privateuse1_stream_cls_loaded:
+        return
+    _privateuse1_stream_cls_loaded = True
+
+    private_backend = torch._C._get_privateuse1_backend_name()
+    if private_backend == "privateuseone":
+        return
+    from torch.utils.backend_registration import _get_custom_mod_func
+    try:
+        stream_cls = _get_custom_mod_func("StreamVariable")
+        if stream_cls is not None:
+            backend_mod = getattr(torch, private_backend, None)
+            if backend_mod is not None and hasattr(backend_mod, "current_stream"):
+                _stream_fn_to_variable_cls[backend_mod.current_stream] = stream_cls
+    except RuntimeError:
+        pass
+
 
 def _get_stream_variable_cls(stream_fn: object) -> type[StreamVariable] | None:
+    cls = _stream_fn_to_variable_cls.get(stream_fn)
+    if cls is not None:
+        return cls
+    _init_privateuse1_stream_variable()
     return _stream_fn_to_variable_cls.get(stream_fn)
 
 
